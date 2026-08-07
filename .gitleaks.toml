@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "smoke test sends deliberately fake tokens to assert they are rejected"
+paths = ['''^scripts/smoke\.sh$''']
+
+[[allowlists]]
+description = "env templates carry keys with no values"
+paths = ['''\.(example|sample|template|dist)$''']

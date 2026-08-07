@@ -1,0 +1,1043 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "claude-headless-api",
+    "version": "0.1.0",
+    "summary": "Anthropic-compatible HTTP surface over Claude Code headless.",
+    "description": "Wraps the Claude Code headless harness behind two surfaces: an Anthropic Messages API emulation (`/v1/messages`, including caller-owned tool calling) and an agent surface (`/v1/runs`) where the harness keeps its own tools.\n\n**Credentials are per request.** The service holds no upstream Claude credential; callers send their own in `x-claude-token`, so a compromised instance costs no accounts.\n\n**Cost note.** The harness adds roughly 2,000 prompt tokens to every cold request. On a metered API key this is far more expensive than calling api.anthropic.com directly; it is intended for subscription credentials, where tokens draw down rate limit rather than money.",
+    "license": {
+      "name": "UNLICENSED"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8787",
+      "description": "Local"
+    }
+  ],
+  "tags": [
+    {
+      "name": "messages",
+      "description": "Anthropic Messages API emulation."
+    },
+    {
+      "name": "runs",
+      "description": "Agent mode: the harness plans and uses its own tools."
+    },
+    {
+      "name": "credentials",
+      "description": "Validate caller-supplied Claude credentials."
+    },
+    {
+      "name": "meta",
+      "description": "Service metadata."
+    }
+  ],
+  "security": [
+    {
+      "serviceKey": []
+    },
+    {
+      "serviceBearer": []
+    }
+  ],
+  "paths": {
+    "/v1/messages": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Create a message",
+        "description": "Wire-compatible with `POST https://api.anthropic.com/v1/messages`.\n\nWithout `tools` this is a plain completion. With `tools`, the model's tool calls are handed back to you as `tool_use` blocks with `stop_reason: \"tool_use\"` \u2014 you execute them and send the results back as `tool_result` blocks, exactly as against the real API.\n\n**Continuations depend on `tool_use.id`.** The harness is stateful but this API is not, so the session id is packed into that field as `<toolUseId>~<sessionId>`. Echo it back verbatim in `tool_result.tool_use_id`. Clients that rewrite the id break the continuation and fall back to a lossy cold start.",
+        "operationId": "createMessage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ClaudeToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessagesRequest"
+              },
+              "examples": {
+                "plain": {
+                  "summary": "Plain completion",
+                  "value": {
+                    "model": "claude-sonnet-4-6",
+                    "system": "Answer in one word.",
+                    "messages": [
+                      {
+                        "role": "user",
+                        "content": "Capital of France?"
+                      }
+                    ]
+                  }
+                },
+                "toolCall": {
+                  "summary": "Tool call, first turn",
+                  "value": {
+                    "system": "You are a weather bot. Use get_weather.",
+                    "messages": [
+                      {
+                        "role": "user",
+                        "content": "Weather in Paris?"
+                      }
+                    ],
+                    "tools": [
+                      {
+                        "name": "get_weather",
+                        "description": "Get current weather for a city.",
+                        "input_schema": {
+                          "type": "object",
+                          "properties": {
+                            "city": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "city"
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                },
+                "toolResult": {
+                  "summary": "Tool call, returning the result",
+                  "description": "The tool_use id is echoed verbatim, carrying the session.",
+                  "value": {
+                    "system": "You are a weather bot. Use get_weather.",
+                    "messages": [
+                      {
+                        "role": "user",
+                        "content": "Weather in Paris?"
+                      },
+                      {
+                        "role": "assistant",
+                        "content": [
+                          {
+                            "type": "tool_use",
+                            "id": "toolu_01ABC~9be0403a-6683-4aaa-9eb3-dee9a600f3c8",
+                            "name": "get_weather",
+                            "input": {
+                              "city": "Paris"
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "role": "user",
+                        "content": [
+                          {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_01ABC~9be0403a-6683-4aaa-9eb3-dee9a600f3c8",
+                            "content": "18C, light rain"
+                          }
+                        ]
+                      }
+                    ],
+                    "tools": [
+                      {
+                        "name": "get_weather",
+                        "description": "Get current weather for a city.",
+                        "input_schema": {
+                          "type": "object",
+                          "properties": {
+                            "city": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "city"
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                },
+                "vision": {
+                  "summary": "Image input",
+                  "value": {
+                    "messages": [
+                      {
+                        "role": "user",
+                        "content": [
+                          {
+                            "type": "image",
+                            "source": {
+                              "type": "base64",
+                              "media_type": "image/png",
+                              "data": "iVBORw0KG..."
+                            }
+                          },
+                          {
+                            "type": "text",
+                            "text": "What colour is this?"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "An assistant message, or an SSE stream when `stream` is true.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_abc\",\"role\":\"assistant\",\"content\":[]}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Paris\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing service credentials, or the caller's Claude credential was rejected upstream (`reauth_required: true`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "type": "error",
+                  "error": {
+                    "type": "authentication_error",
+                    "message": "Failed to authenticate. API Error: 401 OAuth access token is invalid.",
+                    "reauth_required": true
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited or at capacity. Carries `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait."
+              }
+            }
+          },
+          "504": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/runs": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Run the agent",
+        "description": "The harness keeps its own tools (bash, file edit, search) and works the task to completion. Use this when you want the agent; use `/v1/messages` when you want a completion endpoint.\n\n`cwd` is resolved inside the service's workspace root. Absolute paths and traversal are rejected \u2014 agent runs execute arbitrary commands, so this is what keeps them off the rest of the container.",
+        "operationId": "createRun",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ClaudeToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunRequest"
+              },
+              "examples": {
+                "simple": {
+                  "summary": "One-shot task",
+                  "value": {
+                    "messages": [
+                      {
+                        "role": "user",
+                        "content": "List the files here and summarise the project."
+                      }
+                    ],
+                    "max_turns": 10
+                  }
+                },
+                "resumed": {
+                  "summary": "Continue an earlier run in a subdirectory",
+                  "value": {
+                    "session_id": "9be0403a-6683-4aaa-9eb3-dee9a600f3c8",
+                    "cwd": "projects/api",
+                    "messages": [
+                      {
+                        "role": "user",
+                        "content": "Now add tests."
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The completed run, or an SSE trace when `stream` is true.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResult"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Raw harness messages, one per event. Event names are the SDK message types: `system`, `assistant`, `user`, `result`."
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "description": "Missing service credentials, or the caller's Claude credential was rejected upstream (`reauth_required: true`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "type": "error",
+                  "error": {
+                    "type": "authentication_error",
+                    "message": "Failed to authenticate. API Error: 401 OAuth access token is invalid.",
+                    "reauth_required": true
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited or at capacity. Carries `Retry-After`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                },
+                "description": "Seconds to wait."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/credentials/verify": {
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Validate a Claude credential",
+        "description": "Authenticates the token against `GET /v1/models` upstream, which costs no tokens. Use it when a user first attaches an account, so a bad paste is a form error rather than a failure on first real use.\n\nAccepts subscription tokens (`sk-ant-oat\u2026`) and API keys; the kind is detected by prefix. The token is never echoed back or logged.",
+        "operationId": "verifyCredential",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "token"
+                ],
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "examples": [
+                      "sk-ant-oat01-..."
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Valid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResult"
+                },
+                "example": {
+                  "valid": true,
+                  "status": "valid",
+                  "kind": "oauth",
+                  "reauth_required": false,
+                  "checked_at": "2026-08-07T10:19:39.714Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, or missing from the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResult"
+                },
+                "example": {
+                  "valid": false,
+                  "status": "invalid",
+                  "kind": "oauth",
+                  "reauth_required": true,
+                  "reason": "invalid bearer token",
+                  "checked_at": "2026-08-07T10:19:39.714Z"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/messages/count_tokens": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Not supported",
+        "description": "Always returns 501. The harness reports usage only after a turn has run and exposes no counting endpoint; an estimate would fail later and further from the cause. Call api.anthropic.com directly, or read `usage` from a completed turn.",
+        "operationId": "countTokens",
+        "responses": {
+          "501": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "List models",
+        "operationId": "listModels",
+        "responses": {
+          "200": {
+            "description": "Available models.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "const": "model"
+                          },
+                          "id": {
+                            "type": "string"
+                          },
+                          "display_name": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "has_more": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "This document",
+        "operationId": "getOpenapi",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document."
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Liveness",
+        "operationId": "health",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "model": {
+                      "type": "string"
+                    },
+                    "draining": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "description": "Liveness. Stays 200 while draining \u2014 use /ready for load-balancer membership."
+      }
+    },
+    "/v1/credentials/status": {
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Re-check the credential on this request",
+        "description": "Verifies the token in `x-claude-token` and reports its health. Separate from `verify` so a scheduled health check can reuse the header it would use for real traffic, instead of moving the secret into a body.\n\n**Always answers 200 when a credential is present** \u2014 the credential's health is the payload, not the outcome of the call, so a monitor can tell \"the token is dead\" from \"the check itself failed\". Branch on `status` and `reauth_required`, not on the HTTP code.",
+        "operationId": "credentialStatus",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ClaudeToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential health.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResult"
+                },
+                "examples": {
+                  "healthy": {
+                    "summary": "Still good",
+                    "value": {
+                      "valid": true,
+                      "status": "valid",
+                      "kind": "oauth",
+                      "reauth_required": false,
+                      "checked_at": "2026-08-07T10:19:39.714Z"
+                    }
+                  },
+                  "dead": {
+                    "summary": "Needs re-authentication",
+                    "value": {
+                      "valid": false,
+                      "status": "invalid",
+                      "kind": "oauth",
+                      "reauth_required": true,
+                      "reason": "OAuth access token is invalid",
+                      "checked_at": "2026-08-07T10:19:39.714Z"
+                    }
+                  },
+                  "inconclusive": {
+                    "summary": "Upstream unreachable \u2014 do not prompt for re-auth",
+                    "value": {
+                      "valid": false,
+                      "status": "unreachable",
+                      "kind": "oauth",
+                      "reauth_required": false,
+                      "reason": "could not reach api.anthropic.com: timeout",
+                      "checked_at": "2026-08-07T10:19:39.714Z"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Readiness",
+        "description": "Returns 503 while the instance is draining, so an orchestrator removes it from rotation before it starts refusing work. `/health` stays 200 throughout \u2014 a failing liveness probe would kill the pod before in-flight turns finish.",
+        "operationId": "ready",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Accepting work.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ready": {
+                      "const": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Draining.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ready": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "serviceKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "Gates access to this service. Not a Claude credential."
+      },
+      "serviceBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Alternative to `x-api-key`, same value."
+      }
+    },
+    "parameters": {
+      "ClaudeToken": {
+        "name": "x-claude-token",
+        "in": "header",
+        "required": true,
+        "description": "The caller's own Claude credential (`sk-ant-oat\u2026` subscription token or API key). Required \u2014 the service holds none of its own. Only optional when the service was started with `ALLOW_AMBIENT_CREDENTIAL=1`, which is for local development.",
+        "schema": {
+          "type": "string",
+          "pattern": "^sk-ant-[A-Za-z0-9_-]{10,}$"
+        }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Anthropic-shaped error.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "type": "error",
+              "error": {
+                "type": "invalid_request_error",
+                "message": "messages: must be a non-empty array"
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "const": "error"
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "invalid_request_error",
+                  "authentication_error",
+                  "not_found_error",
+                  "request_too_large",
+                  "rate_limit_error",
+                  "timeout_error",
+                  "api_error",
+                  "overloaded_error",
+                  "not_implemented_error"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "reauth_required": {
+                "type": "boolean",
+                "description": "Additive, non-standard. Present and true when the caller's Claude credential was rejected upstream \u2014 expired, revoked or malformed. Prompt for a new token rather than retrying."
+              }
+            }
+          }
+        }
+      },
+      "ContentBlock": {
+        "type": "object",
+        "description": "A Messages API content block. `text`, `image` and `document` are accepted on input; `text` and `tool_use` are returned.",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "text",
+              "image",
+              "document",
+              "tool_use",
+              "tool_result"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "id": {
+            "type": "string",
+            "description": "On tool_use: `<toolUseId>~<sessionId>`. Echo verbatim."
+          },
+          "name": {
+            "type": "string"
+          },
+          "input": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "tool_use_id": {
+            "type": "string"
+          },
+          "content": {}
+        },
+        "additionalProperties": true
+      },
+      "InputMessage": {
+        "type": "object",
+        "required": [
+          "role",
+          "content"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant"
+            ]
+          },
+          "content": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ContentBlock"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "Tool": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "description": "Routed internally as `mcp__bridge__<name>`, hence the character restriction."
+          },
+          "description": {
+            "type": "string"
+          },
+          "input_schema": {
+            "type": "object",
+            "description": "JSON Schema. Supported: object/array/string/number/integer/boolean/null, enum, const, anyOf, oneOf, required, description. Unrecognised constructs are passed to the model but not enforced.",
+            "additionalProperties": true
+          }
+        }
+      },
+      "Usage": {
+        "type": "object",
+        "properties": {
+          "input_tokens": {
+            "type": "integer"
+          },
+          "output_tokens": {
+            "type": "integer"
+          },
+          "cache_creation_input_tokens": {
+            "type": "integer"
+          },
+          "cache_read_input_tokens": {
+            "type": "integer"
+          }
+        }
+      },
+      "MessagesRequest": {
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "default": "claude-sonnet-4-6"
+          },
+          "system": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ContentBlock"
+                }
+              }
+            ],
+            "description": "Replaces the harness system prompt entirely."
+          },
+          "messages": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/InputMessage"
+            }
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Tool"
+            }
+          },
+          "stream": {
+            "type": "boolean",
+            "default": false
+          },
+          "max_tokens": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Validated but not enforced \u2014 the harness exposes no output cap. `stop_reason: \"max_tokens\"` is still reported when truncation happens."
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "RunRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/MessagesRequest"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "cwd": {
+                "type": "string",
+                "description": "Relative to the workspace root, and must already exist. Absolute paths and `..` traversal are rejected."
+              },
+              "session_id": {
+                "type": "string",
+                "description": "Resume a previous run."
+              },
+              "allowed_tools": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Restrict the harness toolset. Omit for the full preset."
+              },
+              "max_turns": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 60
+              }
+            }
+          }
+        ]
+      },
+      "Message": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "const": "message"
+          },
+          "role": {
+            "const": "assistant"
+          },
+          "model": {
+            "type": "string"
+          },
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContentBlock"
+            }
+          },
+          "stop_reason": {
+            "type": "string",
+            "enum": [
+              "end_turn",
+              "tool_use",
+              "max_tokens"
+            ]
+          },
+          "stop_sequence": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          },
+          "_headless": {
+            "type": "object",
+            "description": "Non-standard addition; ignore it for wire compatibility.",
+            "properties": {
+              "session_id": {
+                "type": "string"
+              },
+              "cost_usd": {
+                "type": "number",
+                "description": "Harness estimate, not a billing statement."
+              }
+            }
+          }
+        }
+      },
+      "RunResult": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string",
+            "description": "Concatenated text output."
+          },
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContentBlock"
+            }
+          },
+          "stop_reason": {
+            "type": "string",
+            "enum": [
+              "end_turn",
+              "tool_use",
+              "max_tokens"
+            ]
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          },
+          "cost_usd": {
+            "type": "number"
+          }
+        }
+      },
+      "VerifyResult": {
+        "type": "object",
+        "properties": {
+          "valid": {
+            "type": "boolean"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "valid",
+              "invalid",
+              "rate_limited",
+              "unreachable"
+            ],
+            "description": "`invalid` covers expired, revoked and malformed alike \u2014 the upstream returns the same 401 for all three, so distinguishing them would be a guess."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "oauth",
+              "api-key"
+            ]
+          },
+          "reauth_required": {
+            "type": "boolean",
+            "description": "The user must supply a new token; retrying this one will not help. False for `rate_limited` and `unreachable`, which say nothing about the credential."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Upstream message. Present when not valid."
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}

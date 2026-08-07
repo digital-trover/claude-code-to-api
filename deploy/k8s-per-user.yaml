@@ -1,0 +1,170 @@
+# One deployment per user. Substitute the variables and apply:
+#
+#   export USER_ID=alice IMAGE=ghcr.io/you/claude-api:0.1.0
+#   export SERVICE_AUTH_TOKEN="$(openssl rand -hex 16)"
+#   envsubst < deploy/k8s-per-user.yaml | kubectl apply -f -
+#
+# Isolation model: each user gets their own pod, workspace volume and session
+# transcripts. Upstream Claude credentials are NOT stored here — callers send
+# their own per request in x-claude-token, so a compromised pod costs no
+# accounts and each user's work draws on their own rate limit and quota.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: claude-api-${USER_ID}
+  labels: { app: claude-api, user: "${USER_ID}" }
+type: Opaque
+stringData:
+  # Gates the pod, so reaching the port is not the same as being the user.
+  # This is NOT a Claude credential — those travel per request.
+  SERVICE_AUTH_TOKEN: "${SERVICE_AUTH_TOKEN}"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claude-api-${USER_ID}-workspace
+  labels: { app: claude-api, user: "${USER_ID}" }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Session transcripts, kept apart from the workspace for two reasons: user code
+# and conversation history have different retention needs, and this volume must
+# never acquire a stored Claude login. That absence is what forces a
+# caller-supplied token to be used instead of silently falling back to one.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claude-api-${USER_ID}-sessions
+  labels: { app: claude-api, user: "${USER_ID}" }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-api-${USER_ID}
+  labels: { app: claude-api, user: "${USER_ID}" }
+spec:
+  # Sessions are files on a ReadWriteOnce volume; a second replica would race
+  # them. Scale by adding users, not replicas. To run several replicas for one
+  # user, move transcripts to a shared SessionStore first.
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: claude-api, user: "${USER_ID}" }
+  template:
+    metadata:
+      labels: { app: claude-api, user: "${USER_ID}" }
+    spec:
+      automountServiceAccountToken: false
+      # Must exceed SHUTDOWN_GRACE_MS below, or the pod is SIGKILLed mid-drain
+      # and in-flight turns die after the user has already paid for them.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 8787 }
+          envFrom:
+            - secretRef: { name: claude-api-${USER_ID} }
+          env:
+            - { name: HOST, value: 0.0.0.0 }
+            - { name: WORKDIR, value: /workspace }
+            # Transcripts live here, and this directory holds no stored login.
+            # Without it they default under /workspace and land on the wrong
+            # volume. Note this is SESSION_DIR, not CLAUDE_CONFIG_DIR — the
+            # service sets the latter itself, per request.
+            - { name: SESSION_DIR, value: /sessions }
+            - { name: DEFAULT_MODEL, value: claude-sonnet-4-6 }
+            - { name: TURN_TIMEOUT_MS, value: "600000" }
+            # Each turn is a `claude` subprocess holding hundreds of megabytes,
+            # so this is really a memory setting. Keep it in step with the
+            # memory limit below — roughly two concurrent turns per 2Gi.
+            - { name: MAX_CONCURRENT_TURNS, value: "2" }
+            - { name: MAX_QUEUED_TURNS, value: "8" }
+            - { name: QUEUE_TIMEOUT_MS, value: "30000" }
+            - { name: RATE_LIMIT_PER_MINUTE, value: "60" }
+            - { name: RATE_LIMIT_BURST, value: "20" }
+            - { name: SHUTDOWN_GRACE_MS, value: "45000" }
+            - { name: LOG_LEVEL, value: info }
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+            - { name: sessions, mountPath: /sessions }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            # Agent runs install packages and write scratch files, so the root
+            # filesystem stays writable. Confinement comes from the workspace
+            # guard and the container boundary, not from a read-only rootfs.
+            readOnlyRootFilesystem: false
+          resources:
+            requests: { cpu: 200m, memory: 1Gi }
+            limits: { cpu: "2", memory: 2Gi }
+          # Readiness fails while draining so the pod leaves the Service before
+          # it starts refusing work. Liveness stays up throughout, or Kubernetes
+          # would kill it mid-drain.
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          # The image carries ~286MB of CLI binaries, so first boot is slow;
+          # this keeps a cold start from tripping the liveness probe.
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+      volumes:
+        - name: workspace
+          persistentVolumeClaim: { claimName: claude-api-${USER_ID}-workspace }
+        - name: sessions
+          persistentVolumeClaim: { claimName: claude-api-${USER_ID}-sessions }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: claude-api-${USER_ID}
+  labels: { app: claude-api, user: "${USER_ID}" }
+spec:
+  type: ClusterIP
+  selector: { app: claude-api, user: "${USER_ID}" }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# These instances never need to reach each other, so a compromised agent run
+# should not be able to scan the cluster. Ingress is restricted to the caller;
+# egress is deliberately left open, since turns need api.anthropic.com and
+# agent runs install packages.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claude-api-${USER_ID}
+  labels: { app: claude-api, user: "${USER_ID}" }
+spec:
+  podSelector:
+    matchLabels: { app: claude-api, user: "${USER_ID}" }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: orkest-backend }
+      ports:
+        - { protocol: TCP, port: 8787 }
