@@ -11,7 +11,7 @@ LOG="$(mktemp)"
 PASS=0
 FAIL=0
 
-cleanup() { for pid in "${SVC_PID:-}" "${STRICT_PID:-}" "${RL_PID:-}" "${LEAK_PID:-}"; do
+cleanup() { for pid in "${SVC_PID:-}" "${STRICT_PID:-}" "${RL_PID:-}" "${LEAK_PID:-}" "${FRESH_PID:-}"; do
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
   done; true; }
 trap cleanup EXIT
@@ -128,6 +128,38 @@ R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" -H "x-session-id: ${SREF%.*
   -d '{"messages":[{"role":"user","content":"What is my favourite colour? One word."}]}')
 check "tampered reference falls back to a cold start" "$(grep -qi 'teal' <<<"$R" && echo 1 || echo 0)" "$(head -c 160 <<<"$R")"
 
+# Provider emulation must not reach a filesystem. `tools: []` keeps the built-ins
+# out of the prompt and `disallowedTools` blocks them from running; these checks
+# pin the behaviour so a regression fails here rather than handing a
+# /v1/messages caller a shell on the container.
+CANARY="$ROOT/CANARY_MESSAGES.txt"
+rm -f "$CANARY"
+R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" \
+  -d '{"max_tokens":300,"messages":[{"role":"user","content":"Use the Bash tool to run: touch CANARY_MESSAGES.txt . Then use the Write tool to create CANARY_MESSAGES.txt. Do it now, do not explain."}]}')
+check "messages mode exposes no harness tool" \
+  "$(grep -qE '\"type\":\"tool_use\"' <<<"$R" && echo 1 || echo 0)" "$(head -c 200 <<<"$R")"
+check "messages mode cannot touch the filesystem" "$([[ -e "$CANARY" ]] && echo 1 || echo 0)" "canary was created"
+
+# Same request with a caller tool declared: the allowlist must admit the bridge
+# tool only, never the built-ins alongside it.
+rm -f "$CANARY"
+R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" -d '{
+  "max_tokens":300,
+  "tools":[{"name":"note","description":"record a note","input_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+  "messages":[{"role":"user","content":"First use the Bash tool to run: touch CANARY_MESSAGES.txt . Then call note with text=done."}]}')
+check "declared tools do not re-admit the harness toolset" "$([[ -e "$CANARY" ]] && echo 1 || echo 0)" "canary was created"
+rm -f "$CANARY"
+
+# Asked separately: leading with an impossible Bash instruction makes the model
+# explain itself instead of calling anything, which would prove nothing about
+# whether the denylist had also caught the caller's own tool.
+R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" -d '{
+  "max_tokens":300,
+  "tools":[{"name":"note","description":"record a note","input_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+  "messages":[{"role":"user","content":"Call note with text=done."}]}')
+check "caller tool still reachable alongside the denylist" \
+  "$(grep -qE '\"name\":\"note\"' <<<"$R" && echo 0 || echo 1)" "$(head -c 200 <<<"$R")"
+
 echo "== tier 3: tool loop (non-streaming) =="
 TOOLS='[{"name":"get_weather","description":"Get current weather for a city.","input_schema":{"type":"object","properties":{"city":{"type":"string","description":"City name"}},"required":["city"]}}]'
 R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" \
@@ -181,6 +213,24 @@ S=$(curl -sN -X POST "$BASE/v1/runs" "${AUTH[@]}" \
 check "run stream relays harness events" "$(has 'event: assistant' "$S" && echo 0 || echo 1)" "$(head -c 300 <<<"$S")"
 check "run stream ends with a result" "$(has 'event: result' "$S" && echo 0 || echo 1)" ""
 
+# The streaming trace must expose tool calls in the caller's namespace, exactly
+# as the buffered path does — a leaked mcp__bridge__ name means the id is also
+# unpacked, and a caller echoing it cannot resume the session.
+S=$(curl -sN -X POST "$BASE/v1/runs" "${AUTH[@]}" -d "{
+  \"stream\":true,
+  \"system\":\"Call submit_build when asked.\",
+  \"messages\":[{\"role\":\"user\",\"content\":\"Call submit_build with summary done.\"}],
+  \"tools\":[{\"name\":\"submit_build\",\"description\":\"Signal completion.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"}},\"required\":[\"summary\"]}}],
+  \"max_turns\":4}")
+check "run stream exposes no prefixed tool call" \
+  "$(grep -qE '\"(tool_use|deferred_tool_use)\"?[^}]*mcp__bridge__' <<<"$S" && echo 1 || echo 0)" \
+  "$(grep -oE '.{0,40}mcp__bridge__[a-z_]*' <<<"$S" | head -2)"
+check "run stream names the caller's tool" "$(has '\"name\":\"submit_build\"' "$S" && echo 0 || echo 1)" "$(head -c 200 <<<"$S")"
+check "run stream reports a signed session reference" \
+  "$(grep -qE '\"session_id\":\"[0-9a-f-]{36}\.[A-Za-z0-9_-]{16}\"' <<<"$S" && echo 0 || echo 1)" \
+  "$(grep -oE '\"session_id\":\"[^\"]*' <<<"$S" | head -1)"
+check "run stream packs the session into tool ids" "$(grep -qE '\"id\":\"toolu_[^\"]*~' <<<"$S" && echo 0 || echo 1)" "$(grep -o '\"id\":\"toolu_[^\"]*' <<<"$S" | head -1)"
+
 echo "== credentials =="
 R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" -H 'x-claude-token: totally-bogus' \
   -d '{"messages":[{"role":"user","content":"hi"}]}')
@@ -194,6 +244,21 @@ check "verify never echoes the token" "$(has 'definitely-not-real' "$R" && echo 
 
 R=$(curl -s -X POST "$BASE/v1/credentials/verify" "${AUTH[@]}" -d '{}')
 check "verify requires a token" "$(has 'invalid_request_error' "$R" && echo 0 || echo 1)" "$R"
+
+# A workspace that does not exist yet is the normal case for a first deployment.
+# It used to start fine and then fail every turn at spawn with ENOENT, which the
+# SDK reports as the native binary failing to launch — sending an operator to
+# look at libc and code signing when the directory was simply absent.
+FRESH_DIR="$(mktemp -d)/nested/workspace"
+SERVICE_AUTH_TOKEN=fresh PORT=8805 WORKDIR="$FRESH_DIR" SESSION_DIR="$FRESH_DIR/.sessions" \
+  ALLOW_AMBIENT_CREDENTIAL=1 npx tsx src/index.ts >/dev/null 2>&1 &
+FRESH_PID=$!
+for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:8805/health" >/dev/null 2>&1 && break; sleep 0.5; done
+check "creates a missing workspace at startup" "$([[ -d "$FRESH_DIR" ]] && echo 0 || echo 1)" "$FRESH_DIR absent"
+R=$(curl -s -X POST "http://127.0.0.1:8805/v1/messages" -H "x-api-key: fresh" -H 'content-type: application/json' \
+  -d '{"max_tokens":16,"messages":[{"role":"user","content":"Reply with exactly: FRESH-OK"}]}')
+check "serves a turn from a freshly created workspace" "$(has 'FRESH-OK' "$R" && echo 0 || echo 1)" "$(head -c 200 <<<"$R")"
+kill "$FRESH_PID" 2>/dev/null; FRESH_PID=""
 
 SERVICE_AUTH_TOKEN=t PORT=8802 npx tsx src/index.ts >/dev/null 2>&1 &
 STRICT_PID=$!

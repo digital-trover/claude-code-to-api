@@ -25,7 +25,7 @@ export interface TurnResult {
 
 /** Run one turn to completion. */
 export async function runTurn(req: RunRequest, ctx: TurnContext): Promise<TurnResult> {
-  const { options, prompt, seedSession } = prepareTurn(req, ctx, false);
+  const { options, prompt, seedSession } = await prepareTurn(req, ctx, false);
   const { controller, clear } = startDeadline(ctx.cfg.turnTimeoutMs, ctx.signal);
 
   const collected: ContentBlock[] = [];

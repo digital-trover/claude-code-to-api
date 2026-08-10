@@ -4,6 +4,7 @@
  * Upstream Claude credentials arrive per request in `x-claude-token`; the
  * service stores none, so a compromised instance costs no accounts.
  */
+import { mkdir } from 'node:fs/promises';
 import { loadConfig, startupWarnings } from './config.js';
 import { createLogger } from './logger.js';
 import { createApp } from './server.js';
@@ -12,6 +13,28 @@ const cfg = loadConfig();
 const log = createLogger(cfg.logLevel);
 
 for (const warning of startupWarnings(cfg)) log.error(warning);
+
+/**
+ * Both directories must exist before the first turn.
+ *
+ * The workspace is the spawned harness's working directory: a missing one makes
+ * every turn fail at `spawn` with ENOENT, which the SDK reports as the native
+ * binary failing to launch — sending you to look at libc and code signing when
+ * the directory simply is not there. The session directory must exist and hold
+ * no stored login, since that is what stops an invalid caller-supplied token
+ * from silently falling back to this host's own account.
+ *
+ * Created here rather than in `createApp` so a permission failure stops the
+ * process instead of surfacing once per request.
+ */
+for (const dir of [cfg.workdir, cfg.sessionDir]) {
+  try {
+    await mkdir(dir, { recursive: true });
+  } catch (e) {
+    log.error(`cannot create ${dir}: ${String(e)}`);
+    process.exit(1);
+  }
+}
 
 const { server, shutdown } = createApp(cfg, log);
 

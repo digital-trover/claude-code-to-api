@@ -76,7 +76,7 @@ export async function listFiles(
   prefix?: string,
   options: ListOptions = {},
 ): Promise<FileListing> {
-  const root = workspace.resolve(prefix);
+  const root = await workspace.resolve(prefix);
   const limit = options.limit ?? MAX_FILES;
   const includeAll = options.includeAll === true;
 

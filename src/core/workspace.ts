@@ -1,4 +1,4 @@
-import { statSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
 
 /**
@@ -40,7 +40,7 @@ export class Workspace {
   }
 
   /** Resolve a directory that must already exist. Used for a run's `cwd`. */
-  resolve(requested?: string): string {
+  async resolve(requested?: string): Promise<string> {
     if (!requested) return this.root;
     const target = this.contain(requested, 'cwd');
 
@@ -48,7 +48,7 @@ export class Workspace {
     // which sends the reader looking at libc versions instead of their path.
     let stats;
     try {
-      stats = statSync(target);
+      stats = await stat(target);
     } catch {
       throw new Error(`cwd: no such directory in the workspace (${requested})`);
     }

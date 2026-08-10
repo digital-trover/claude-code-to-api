@@ -7,7 +7,6 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
-import { mkdirSync } from 'node:fs';
 import type { Config } from './config.js';
 import type { Logger } from './logger.js';
 import { ApiError, notFound, toApiError, unauthorized } from './http/errors.js';
@@ -91,9 +90,6 @@ export interface App {
 export function createApp(cfg: Config, log: Logger): App {
   const workspace = new Workspace(cfg.workdir);
 
-  // Must exist and hold no stored login: it is what stops an invalid
-  // caller-supplied token from silently falling back to the host's account.
-  mkdirSync(cfg.sessionDir, { recursive: true });
   const turns = new ConcurrencyLimiter(cfg.maxConcurrentTurns, cfg.maxQueuedTurns, cfg.queueTimeoutMs);
   const rate = new RateLimiter(cfg.rateLimitPerMinute, cfg.rateLimitBurst);
 
@@ -158,6 +154,16 @@ export function createApp(cfg: Config, log: Logger): App {
   }
 
   const server = createServer((req, res) => {
+    // Access log. Only failures were logged before, so a working service looked
+    // like a dead one — there was no way to tell "handling requests" from
+    // "never reached". Health checks are excluded: an orchestrator polls them
+    // every few seconds and would bury everything else.
+    const startedAt = Date.now();
+    res.on('finish', () => {
+      if (req.url === '/health' || req.url === '/ready') return;
+      log.info(`${req.method} ${req.url} -> ${res.statusCode} ${Date.now() - startedAt}ms`);
+    });
+
     handle(req, res).catch((err: unknown) => {
       // A client that hung up mid-turn is not a server fault.
       if (res.destroyed || (err as Error)?.name === 'AbortError') {

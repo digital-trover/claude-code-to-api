@@ -5,3 +5,4 @@ dist/
 .claude-sessions/
 sub/
 fixture/
+builds

@@ -7,21 +7,53 @@ import { addPrefix, buildBridge, deferHook } from './tools.js';
 import { systemToText, type RunRequest } from '../types/wire.js';
 
 /**
+ * Built-ins denied in provider emulation.
+ *
+ * `tools: []` already keeps these out of the prompt, and a model cannot call
+ * what it cannot see — but that is one layer, and a silent one: if an empty
+ * array were ever read as "unset" rather than "none", a `/v1/messages` caller
+ * would get a shell and nothing would fail loudly. `disallowedTools` blocks
+ * execution outright, including harness-internal use.
+ *
+ * A denylist goes stale as new built-ins ship, so it is the second layer, not
+ * the first — `allowedTools` below is the one that holds for tools not named
+ * here.
+ */
+const HARNESS_TOOLS = [
+  'Bash',
+  'BashOutput',
+  'KillShell',
+  'Read',
+  'Write',
+  'Edit',
+  'MultiEdit',
+  'NotebookEdit',
+  'Glob',
+  'Grep',
+  'WebSearch',
+  'WebFetch',
+  'Task',
+  'TodoWrite',
+  'SlashCommand',
+  'Skill',
+  'ExitPlanMode',
+];
+/**
  * `tools: []` removes built-in tool schemas from the prompt; `disallowedTools`
  * only blocks execution and leaves them there. Measured on Sonnet 4.6 that is
  * ~2k vs ~17k prompt tokens per cold request.
  */
-function buildOptions(
+async function buildOptions(
   req: RunRequest,
   ctx: TurnContext,
   resume: string | undefined,
   stream: boolean,
-): Options {
+): Promise<Options> {
   const { cfg, workspace, mode } = ctx;
 
   const opts: Options = {
     model: req.model ?? cfg.defaultModel,
-    cwd: mode === 'run' ? workspace.resolve(req.cwd) : workspace.root,
+    cwd: mode === 'run' ? await workspace.resolve(req.cwd) : workspace.root,
     settingSources: [],
     includePartialMessages: stream,
     maxTurns: req.max_turns ?? (mode === 'run' ? 60 : 8),
@@ -42,9 +74,12 @@ function buildOptions(
     if (req.allowed_tools?.length) opts.allowedTools = req.allowed_tools;
   } else {
     // Provider emulation: strip the harness's own tools so the prompt carries
-    // only what the caller declared.
+    // only what the caller declared, then deny them execution as well. This
+    // endpoint emulates the Messages API, which cannot touch a filesystem —
+    // a caller here must never obtain one.
     opts.tools = [];
     opts.thinking = { type: 'disabled' };
+    opts.disallowedTools = HARNESS_TOOLS;
   }
 
   // Caller tools work in both modes. In agent mode they sit alongside the
@@ -54,8 +89,11 @@ function buildOptions(
   if (tools.length > 0) {
     opts.mcpServers = { bridge: buildBridge(tools) };
     opts.hooks = deferHook;
-    if (mode === 'messages') opts.allowedTools = tools.map((t) => addPrefix(t.name));
   }
+  // Always an allowlist in provider emulation, empty when the caller declared
+  // nothing. Set unconditionally: gating it on `tools.length` left the plain
+  // provider case — the common one — with no execution allowlist at all.
+  if (mode === 'messages') opts.allowedTools = tools.map((t) => addPrefix(t.name));
   return opts;
 }
 
@@ -80,7 +118,11 @@ function resolveSession(req: RunRequest, ctx: TurnContext, pending: PendingResul
   return verifySession(reference, ctx.credential?.token) ?? '';
 }
 
-export function prepareTurn(req: RunRequest, ctx: TurnContext, stream: boolean): PreparedTurn {
+export async function prepareTurn(
+  req: RunRequest,
+  ctx: TurnContext,
+  stream: boolean,
+): Promise<PreparedTurn> {
   // Both modes: a deferred tool is answered the same way regardless of whether
   // the harness also had tools of its own. Results whose ids are not ours fail
   // to unpack and fall through to the normal path.
@@ -88,7 +130,7 @@ export function prepareTurn(req: RunRequest, ctx: TurnContext, stream: boolean):
   const resume = resolveSession(req, ctx, pending);
 
   return {
-    options: buildOptions(req, ctx, resume || undefined, stream),
+    options: await buildOptions(req, ctx, resume || undefined, stream),
     prompt: buildPrompt(req.messages, pending, resume !== ''),
     seedSession: resume,
   };

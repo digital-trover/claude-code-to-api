@@ -49,7 +49,7 @@ export async function* streamTurn(
   ctx: TurnContext,
   id: string,
 ): AsyncGenerator<SseEvent> {
-  const { options, prompt, seedSession } = prepareTurn(req, ctx, true);
+  const { options, prompt, seedSession } = await prepareTurn(req, ctx, true);
   const { controller, clear } = startDeadline(ctx.cfg.turnTimeoutMs, ctx.signal);
 
   const totals = new UsageAccumulator();
@@ -159,15 +159,91 @@ export async function* streamTurn(
 }
 
 /** Raw harness events for agent-mode runs, for callers that want the trace. */
+/**
+ * Harness events for agent-mode runs, for callers that want the trace.
+ *
+ * Messages pass through largely as the harness emitted them, with one
+ * correction: tool calls in assistant content are rewritten into the caller's
+ * namespace, exactly as the buffered path does. Relaying them raw would hand
+ * back an `mcp__bridge__`-prefixed name and an unpacked id, and a caller
+ * echoing that id could not resume the session — the tool result would be
+ * treated as unrelated and silently start a fresh turn instead.
+ */
 export async function* streamRun(req: RunRequest, ctx: TurnContext): AsyncGenerator<SDKMessage> {
-  const { options, prompt } = prepareTurn(req, ctx, false);
+  // Partial messages on: without them a caller sees nothing until a whole
+  // assistant message lands, which is the difference between a reply that types
+  // itself out and half a minute of silence.
+  const { options, prompt, seedSession } = await prepareTurn(req, ctx, true);
   const { controller, clear } = startDeadline(ctx.cfg.turnTimeoutMs, ctx.signal);
+
+  let sessionId = seedSession;
+
   try {
     for await (const msg of query({
       prompt,
       options: { ...options, abortController: controller },
     })) {
-      yield msg;
+      if ('session_id' in msg && msg.session_id) sessionId = msg.session_id;
+      const sessionRef = signSession(sessionId, ctx.credential?.token);
+
+      // Relayed messages carry the signed reference, not the harness's raw id.
+      // The buffered response already returns the signed form, and a caller
+      // that took the raw id from the trace would have it rejected on resume —
+      // silently starting a new conversation instead of continuing this one.
+      const withRef = <T extends SDKMessage>(m: T): T =>
+        'session_id' in m && m.session_id ? ({ ...m, session_id: sessionRef } as T) : m;
+
+      // `deferred_tool_use` is the same pending call surfaced on the result,
+      // so it needs the same rewrite — a caller reading it instead of the
+      // assistant block would otherwise get an id it cannot echo back.
+      if (msg.type === 'result') {
+        const deferred = (msg as { deferred_tool_use?: { id: string; name: string; input: unknown } })
+          .deferred_tool_use;
+
+        if (deferred) {
+          const exposed = exposeToolUse(
+            { type: 'tool_use', id: deferred.id, name: deferred.name },
+            signSession(sessionId, ctx.credential?.token),
+          );
+          yield withRef({
+            ...msg,
+            deferred_tool_use: {
+              id: String(exposed.id),
+              name: String(exposed.name),
+              input: deferred.input,
+            },
+          } as SDKMessage);
+          continue;
+        }
+        yield withRef(msg);
+        continue;
+      }
+
+      // Text deltas only. The other partials describe tool calls as they open,
+      // carrying the bridge-prefixed name and an id that has not been packed
+      // with the session yet — neither may reach the caller, and the completed
+      // `assistant` message relays them properly a moment later.
+      if (msg.type === 'stream_event') {
+        const event = msg.event as { type?: string; delta?: { type?: string } };
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+          yield withRef(msg);
+        }
+        continue;
+      }
+
+      if (msg.type !== 'assistant') {
+        yield withRef(msg);
+        continue;
+      }
+
+      const content = (msg.message.content as unknown as ContentBlock[])
+        .filter((b) => !isUnreplayable(b.type) && isPendingForCaller(b))
+        .map((b) => (b.type === 'tool_use' ? exposeToolUse(b, sessionRef) : b));
+
+      yield withRef({
+        ...msg,
+        message: { ...msg.message, content: content as never },
+      });
     }
   } finally {
     clear();
