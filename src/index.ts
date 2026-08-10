@@ -40,11 +40,35 @@ async function stop(reason: string, code: number): Promise<void> {
 }
 
 /**
- * An uncaught exception leaves the process in an unknown state, so the only
- * safe move is to drain and exit — but draining first means in-flight turns
- * are not silently lost, which matters when each one is spending real money.
+ * Errors that belong to one connection or one child process, not to the
+ * service. A turn spawns a `claude` subprocess and streams to a client that may
+ * hang up at any moment, so these arrive routinely and asynchronously — often
+ * from a stream with no listener attached, which lands here rather than in the
+ * request handler. Killing the process over one of them would drop every other
+ * in-flight turn.
+ */
+const TRANSIENT_ERRORS = new Set([
+  'EPIPE',
+  'ECONNRESET',
+  'ERR_STREAM_PREMATURE_CLOSE',
+  'ERR_STREAM_DESTROYED',
+  'ERR_STREAM_WRITE_AFTER_END',
+  'ABORT_ERR',
+]);
+
+const isTransient = (err: Error): boolean =>
+  TRANSIENT_ERRORS.has((err as NodeJS.ErrnoException).code ?? '') || err.name === 'AbortError';
+
+/**
+ * Anything else leaves the process in an unknown state, so the only safe move
+ * is to drain and exit — draining first so in-flight turns are not silently
+ * lost, which matters when each one is spending someone's money.
  */
 process.on('uncaughtException', (err) => {
+  if (isTransient(err)) {
+    log.error(`transient error, continuing: ${err.message}`);
+    return;
+  }
   log.error('uncaught exception', err.stack ?? err.message);
   void stop('fatal error', 1);
 });

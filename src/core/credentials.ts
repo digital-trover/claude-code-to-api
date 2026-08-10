@@ -35,6 +35,49 @@ export function resolveCredential(headerToken: string | undefined): Credential |
 }
 
 /**
+ * Variables the harness subprocess is allowed to see.
+ *
+ * An allowlist, not a filter. `/v1/runs` executes arbitrary commands, so
+ * anything inherited here is readable by agent code — including this service's
+ * own SERVICE_AUTH_TOKEN, which would let a run authenticate back to the API,
+ * and any unrelated secret the platform happens to inject into the pod.
+ *
+ * Extra names can be admitted with CHILD_ENV_PASSTHROUGH for deployments whose
+ * agents genuinely need one, but nothing is inherited implicitly.
+ */
+const BASE_PASSTHROUGH = [
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'TMPDIR',
+  'TZ',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TERM',
+  // Egress through a corporate proxy, and custom trust roots for it.
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+];
+
+function passthroughNames(base: NodeJS.ProcessEnv): string[] {
+  const extra = (base.CHILD_ENV_PASSTHROUGH ?? '')
+    .split(',')
+    .map((n) => n.trim())
+    .filter(Boolean);
+  return [...BASE_PASSTHROUGH, ...extra];
+}
+
+/**
  * Environment for the harness subprocess.
  *
  * Two things have to be true for a caller's token to actually be the one used.
@@ -53,18 +96,23 @@ export function childEnv(
   credential: Credential | null,
   sessionDir: string,
   base: NodeJS.ProcessEnv = process.env,
-): Record<string, string | undefined> | undefined {
-  // Ambient mode deliberately inherits the host's config dir; that is where the
-  // developer's own login lives, and using it is the entire point.
-  if (!credential) return undefined;
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {};
 
-  return {
-    ...base,
-    CLAUDE_CODE_OAUTH_TOKEN: credential.kind === 'oauth' ? credential.token : '',
-    ANTHROPIC_API_KEY: credential.kind === 'api-key' ? credential.token : '',
-    ANTHROPIC_AUTH_TOKEN: '',
-    CLAUDE_CONFIG_DIR: sessionDir,
-  };
+  for (const name of passthroughNames(base)) {
+    if (base[name] !== undefined) env[name] = base[name];
+  }
+
+  // Ambient mode leaves the credential and config-dir variables unset so the
+  // CLI finds the host's own login — which is the entire point of that mode.
+  if (credential) {
+    env.CLAUDE_CODE_OAUTH_TOKEN = credential.kind === 'oauth' ? credential.token : '';
+    env.ANTHROPIC_API_KEY = credential.kind === 'api-key' ? credential.token : '';
+    env.ANTHROPIC_AUTH_TOKEN = '';
+    env.CLAUDE_CONFIG_DIR = sessionDir;
+  }
+
+  return env;
 }
 
 /**

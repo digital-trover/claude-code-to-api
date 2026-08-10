@@ -11,7 +11,7 @@ LOG="$(mktemp)"
 PASS=0
 FAIL=0
 
-cleanup() { for pid in "${SVC_PID:-}" "${STRICT_PID:-}" "${RL_PID:-}"; do
+cleanup() { for pid in "${SVC_PID:-}" "${STRICT_PID:-}" "${RL_PID:-}" "${LEAK_PID:-}"; do
     [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
   done; true; }
 trap cleanup EXIT
@@ -36,6 +36,34 @@ for _ in $(seq 1 40); do
 done
 
 AUTH=(-H "x-api-key: $TOKEN" -H 'content-type: application/json')
+
+# Fixtures are generated rather than committed: they live in the same workspace
+# that agent-mode runs can write to, so anything left lying around is liable to
+# be moved or deleted by a run and take the suite down with it.
+build_fixture() {
+  rm -rf "$ROOT/fixture"
+  mkdir -p "$ROOT/fixture/agent/nested" \
+           "$ROOT/fixture/agent/node_modules/junk" \
+           "$ROOT/fixture/agent/__pycache__" \
+           "$ROOT/sub/dir"
+  printf '{"graphs":{"main":"./graph.py:graph"}}\n' > "$ROOT/fixture/agent/langgraph.json"
+  printf 'from langgraph.graph import StateGraph\ngraph = StateGraph(dict)\n' > "$ROOT/fixture/agent/graph.py"
+  printf 'langgraph\n' > "$ROOT/fixture/agent/requirements.txt"
+  printf 'nested source\n' > "$ROOT/fixture/agent/nested/helper.py"
+  printf 'SHOULD NOT APPEAR\n' > "$ROOT/fixture/agent/node_modules/junk/index.js"
+  printf 'SHOULD NOT APPEAR\n' > "$ROOT/fixture/agent/__pycache__/graph.pyc"
+  # A real PNG, so the binary round-trip check exercises more than magic bytes.
+  python3 -c "
+import zlib,struct,sys
+def png(w,h,rgb):
+    raw=b''.join(b'\x00'+bytes(rgb)*w for _ in range(h))
+    def c(t,d):
+        b=t+d; return struct.pack('>I',len(d))+b+struct.pack('>I',zlib.crc32(b)&0xffffffff)
+    return b'\x89PNG\r\n\x1a\n'+c(b'IHDR',struct.pack('>IIBBBBB',w,h,8,2,0,0,0))+c(b'IDAT',zlib.compress(raw))+c(b'IEND',b'')
+open(sys.argv[1],'wb').write(png(32,32,(200,30,70)))
+" "$ROOT/fixture/agent/logo.png"
+}
+build_fixture
 
 echo "== auth =="
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/messages" -H 'content-type: application/json' -d '{"messages":[]}')
@@ -162,6 +190,46 @@ check "service log never contains a raw token" \
   "$(grep -qE 'sk-ant-[A-Za-z0-9_-]{12,}' "$LOG" && echo 1 || echo 0)" \
   "$(grep -oE 'sk-ant-[A-Za-z0-9_-]{12,}' "$LOG" | head -1)"
 
+echo "== workspace files =="
+R=$(curl -s "$BASE/v1/workspace/files?prefix=fixture/agent" "${AUTH[@]}")
+check "manifest lists files" "$(has 'fixture/agent/graph.py' "$R" && echo 0 || echo 1)" "$(head -c 220 <<<"$R")"
+check "manifest walks nested dirs" "$(has 'nested/helper.py' "$R" && echo 0 || echo 1)" "$(head -c 220 <<<"$R")"
+check "manifest reports integral mtimes" "$(grep -qE '"modified":[0-9]+[,}]' <<<"$R" && echo 0 || echo 1)" "$(head -c 220 <<<"$R")"
+check "manifest filters node_modules" "$(has 'node_modules' "$R" && echo 1 || echo 0)" ""
+check "manifest filters __pycache__" "$(has 'pycache' "$R" && echo 1 || echo 0)" ""
+
+R=$(curl -s "$BASE/v1/workspace/files?prefix=fixture/agent&all=1" "${AUTH[@]}")
+check "all=1 surfaces filtered files" "$(has 'node_modules' "$R" && echo 0 || echo 1)" "$(head -c 220 <<<"$R")"
+
+R=$(curl -s "$BASE/v1/workspace/raw?path=fixture/agent/graph.py" "${AUTH[@]}")
+check "raw returns file contents" "$(has 'StateGraph' "$R" && echo 0 || echo 1)" "$R"
+
+curl -s "$BASE/v1/workspace/raw?path=fixture/agent/logo.png" "${AUTH[@]}" -o /tmp/smoke-logo.png
+check "binary round-trips byte for byte" \
+  "$(cmp -s /tmp/smoke-logo.png "$ROOT/fixture/agent/logo.png" && echo 0 || echo 1)" \
+  "$(wc -c < /tmp/smoke-logo.png) vs $(wc -c < "$ROOT/fixture/agent/logo.png") bytes"
+
+H=$(curl -s -D- -o /dev/null "$BASE/v1/workspace/raw?path=fixture/agent/logo.png" "${AUTH[@]}")
+PNG_SIZE=$(wc -c < "$ROOT/fixture/agent/logo.png" | tr -d ' ')
+check "raw sets content-length" \
+  "$(grep -qi "^content-length: $PNG_SIZE" <<<"$H" && echo 0 || echo 1)" \
+  "expected $PNG_SIZE; $(grep -i content-length <<<"$H")"
+
+R=$(curl -s "$BASE/v1/workspace/raw?path=../../etc/passwd" "${AUTH[@]}")
+check "raw rejects traversal" "$(has 'outside the workspace' "$R" && echo 0 || echo 1)" "$R"
+
+R=$(curl -s "$BASE/v1/workspace/raw?path=/etc/passwd" "${AUTH[@]}")
+check "raw rejects absolute paths" "$(has 'must be relative' "$R" && echo 0 || echo 1)" "$R"
+
+R=$(curl -s "$BASE/v1/workspace/raw?path=fixture/agent/nope.py" "${AUTH[@]}")
+check "missing file is diagnosed" "$(has 'no such file' "$R" && echo 0 || echo 1)" "$R"
+
+R=$(curl -s "$BASE/v1/workspace/raw" "${AUTH[@]}")
+check "raw requires a path" "$(has 'required query parameter' "$R" && echo 0 || echo 1)" "$R"
+
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/workspace/files")
+check "workspace routes require the service token" "$([[ "$CODE" == "401" ]] && echo 0 || echo 1)" "got $CODE"
+
 echo "== credential expiry =="
 # The regression that matters: an invalid token must fail, not silently fall
 # back to whatever account is logged in on the host.
@@ -194,6 +262,37 @@ R=$(curl -s -X POST "$BASE/v1/credentials/verify" "${AUTH[@]}" \
   -d '{"token":"sk-ant-oat01-definitely-not-real-aaaaaaaaaaaaaaaa"}')
 check "verify distinguishes invalid from unreachable" \
   "$(has '"status":"invalid"' "$R" && echo 0 || echo 1)" "$R"
+
+echo "== child process isolation =="
+# The agent runs arbitrary commands, so anything in this process's environment
+# would be readable by it — including the token that gates this very API.
+LEAK_LOG="$(mktemp)"
+SERVICE_AUTH_TOKEN=leak-probe-token PORT=8804 ALLOW_AMBIENT_CREDENTIAL=1 \
+  SMOKE_FAKE_SECRET=must-not-leak npx tsx src/index.ts >"$LEAK_LOG" 2>&1 &
+LEAK_PID=$!
+for _ in $(seq 1 40); do curl -sf http://127.0.0.1:8804/health >/dev/null 2>&1 && break; sleep 0.5; done
+
+R=$(curl -s -X POST http://127.0.0.1:8804/v1/runs \
+  -H 'x-api-key: leak-probe-token' -H 'content-type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Run exactly: env | grep -cE \"SMOKE_FAKE_SECRET|SERVICE_AUTH_TOKEN\". Report only the number."}],"max_turns":3}')
+check "agent cannot read the service token" "$(has 'leak-probe-token' "$R" && echo 1 || echo 0)" "$(head -c 200 <<<"$R")"
+check "agent cannot read host secrets" "$(has 'must-not-leak' "$R" && echo 1 || echo 0)" "$(head -c 200 <<<"$R")"
+
+R=$(curl -s -X POST http://127.0.0.1:8804/v1/runs \
+  -H 'x-api-key: leak-probe-token' -H 'content-type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Run: echo HAVE_PATH=${PATH:+yes}. Report exactly."}],"max_turns":3}')
+check "agent still receives a usable PATH" "$(has 'HAVE_PATH=yes' "$R" && echo 0 || echo 1)" "$(head -c 200 <<<"$R")"
+
+# Children must die with the request, or every hung-up client leaks a process.
+BEFORE=$(pgrep -fc "claude-agent-sdk" 2>/dev/null || echo 0)
+curl -s -m 3 -X POST http://127.0.0.1:8804/v1/runs \
+  -H 'x-api-key: leak-probe-token' -H 'content-type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Count slowly from 1 to 300, one per line."}],"max_turns":3}' >/dev/null 2>&1 || true
+sleep 12
+AFTER=$(pgrep -fc "claude-agent-sdk" 2>/dev/null || echo 0)
+check "client hang-up leaves no orphaned child" "$([[ "$AFTER" -le "$BEFORE" ]] && echo 0 || echo 1)" "before=$BEFORE after=$AFTER"
+check "service survives an aborted turn" "$(curl -sf http://127.0.0.1:8804/health >/dev/null 2>&1 && echo 0 || echo 1)" ""
+kill "$LEAK_PID" 2>/dev/null
 
 echo "== limits and transport =="
 RL_LOG="$(mktemp)"

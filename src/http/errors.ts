@@ -46,7 +46,7 @@ export function toApiError(err: unknown): ApiError {
   const message = err instanceof Error ? err.message : String(err);
   const lower = message.toLowerCase();
 
-  if (lower.startsWith('cwd:')) return badRequest(message);
+  if (lower.startsWith('cwd:') || lower.startsWith('path:')) return badRequest(message);
   if (lower.includes('abort')) {
     return new ApiError(504, 'timeout_error', 'turn exceeded the configured timeout');
   }

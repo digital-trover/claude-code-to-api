@@ -21,6 +21,7 @@ import { createMessage } from './routes/messages.route.js';
 import { createRun } from './routes/runs.route.js';
 import { status, verify } from './routes/credentials.route.js';
 import { countTokens, health, listModels, openapi, ready } from './routes/meta.route.js';
+import { listWorkspace, readWorkspace } from './routes/workspace.route.js';
 
 export interface RequestContext {
   cfg: Config;
@@ -34,6 +35,8 @@ export interface RequestContext {
   signal: AbortSignal;
   /** True once shutdown has begun and the instance is finishing in-flight work. */
   draining: boolean;
+  /** Parsed query string. */
+  query: URLSearchParams;
   sendJson: typeof sendJson;
 }
 
@@ -61,6 +64,8 @@ const ROUTES: Route[] = [
   { method: 'POST', path: '/v1/messages/count_tokens', handler: countTokens },
   { method: 'POST', path: '/v1/messages', handler: createMessage, needsCredential: true, metered: true },
   { method: 'POST', path: '/v1/runs', handler: createRun, needsCredential: true, metered: true },
+  { method: 'GET', path: '/v1/workspace/files', handler: listWorkspace },
+  { method: 'GET', path: '/v1/workspace/raw', handler: readWorkspace },
 ];
 
 const CREDENTIAL_REQUIRED =
@@ -131,6 +136,7 @@ export function createApp(cfg: Config, log: Logger): App {
       credential,
       signal: disconnect.signal,
       draining,
+      query: url.searchParams,
       sendJson,
     };
 

@@ -1,0 +1,23 @@
+# node_modules holds a ~265MB platform-specific Claude Code binary for whatever
+# machine last ran `npm install`. Shipping it into the build context is slow and
+# would put the wrong architecture's binary in the image; the builder stage
+# installs the correct one for the target platform.
+node_modules
+dist
+
+.git
+.gitignore
+.env
+*.log
+
+# Test fixtures and scratch directories.
+fixture
+sub
+.claude-sessions
+scripts/smoke.sh
+
+Dockerfile
+.dockerignore
+deploy
+README.md
+*.md

@@ -61,7 +61,7 @@ curl localhost:8787/v1/messages \
 The full request/response contract is in `openapi.json`, also served at
 `GET /openapi.json`.
 
-Run the end-to-end suite (60 checks, spends real tokens):
+Run the end-to-end suite (74 checks, spends real tokens):
 
 ```bash
 ./scripts/smoke.sh
@@ -123,6 +123,34 @@ can distinguish "the token is dead" from "the check itself failed":
 | `invalid` | **true** | Expired, revoked or malformed — prompt the user |
 | `rate_limited` | false | Says nothing about the credential |
 | `unreachable` | false | Upstream down; do not prompt |
+
+### Connecting an account
+
+There is **no third-party OAuth flow for Claude subscriptions** — no client to
+register, no `client_id`, no redirect to authorize against. Building a "Connect
+with Claude" button would mean driving Anthropic's own first-party OAuth client
+to mint tokens on your users' behalf, which is client impersonation whatever the
+intent. The supported handoff is `claude setup-token`, which is interactive by
+design.
+
+What can be removed is the copy-paste, not the browser step.
+`scripts/connect.sh` runs on the user's own machine, takes one argument, and
+posts the token straight to your platform:
+
+```bash
+./scripts/connect.sh https://your-platform/claude/connect/7Q2K-9WXT
+```
+
+You generate that URL — single-use, short-lived, and carrying whatever identifies
+the account. The token never reaches a clipboard, a chat window, or shell
+history: the script refuses a non-https URL, sends the token on stdin rather
+than as an argument where any local process could read it from the process
+table, and never prints it.
+
+Verify it server-side when it arrives, with `/v1/credentials/verify`.
+
+Users with API access can paste an `sk-ant-api…` key instead; it goes through
+the same field and `verify` reports `kind: "api-key"`.
 
 ### The precedence trap
 
@@ -321,13 +349,51 @@ grace period is moot.
 
 ---
 
+## Workspace files
+
+Agent runs write to the workspace; these two routes read it back. Read-only and
+pull-based, so nothing that writes elsewhere — a git remote, an object store —
+needs a credential inside the sandbox where agent code runs.
+
+```bash
+# Manifest. Dependency trees and build output are filtered; add &all=1 to see them.
+curl "$BASE/v1/workspace/files?prefix=agent" -H "x-api-key: $SERVICE_AUTH_TOKEN"
+# -> {"files":[{"path":"agent/graph.py","size":64,"modified":1786100497959}],"truncated":false}
+
+# One file, raw bytes.
+curl "$BASE/v1/workspace/raw?path=agent/graph.py" -H "x-api-key: $SERVICE_AUTH_TOKEN"
+```
+
+Contents are never inlined or base64-wrapped. A caller that needs base64 — for a
+git blob, say — encodes the bytes it received, which is also the only way binary
+files survive intact. `content-length` is set so a truncated transfer is
+detectable.
+
+Both routes are confined by the same guard as `cwd`: absolute paths and `..`
+are rejected, and symlinks are not followed.
+
 ## Deployment
 
 Every request is short-lived, but session transcripts must persist between them.
 
-**Recommended: one small always-on container with a volume.** Roughly $3–5/month
-and it handles everything below correctly. Mount a volume at the CLI's session
-directory.
+**Recommended: one small always-on container with two volumes** — `/workspace`
+for user files and `/sessions` for transcripts. Roughly $3–5/month.
+
+The image must be **glibc, not musl**. Claude Code ships as a platform-specific
+native binary selected from optionalDependencies, and an alpine base resolves
+the `-musl` variant; mixing them fails at runtime with *"binary exists but
+failed to launch … musl dynamic loader missing"*, which surfaces as an opaque
+500 rather than a build error.
+
+The Dockerfile is multi-stage: TypeScript is compiled in the builder, and only
+production dependencies, `dist/` and `openapi.json` reach the runtime image —
+`typescript`, `tsx` and `@types` (~26MB) stay behind. `tini` is the entrypoint
+because every turn spawns a `claude` subprocess which spawns its own children,
+and Node as PID 1 does not reap orphaned grandchildren.
+
+`.dockerignore` matters here more than usual: `node_modules` holds a ~265MB
+platform-specific binary for whatever machine last ran `npm install`, and
+shipping it into the build context is both slow and the wrong architecture.
 
 Why not Lambda:
 
@@ -371,9 +437,10 @@ src/
     credentials.ts      /v1/credentials/verify body
   routes/
     messages.route.ts   runs.route.ts   credentials.route.ts
-    meta.route.ts       relay.ts
+    workspace.route.ts  meta.route.ts   relay.ts
   core/
     context.ts          per-turn context
+    files.ts            workspace manifest + file resolution
     options.ts          harness options + prompt selection
     prompt.ts           history rendering, tool-result replay
     run-turn.ts         buffered turn
@@ -384,7 +451,8 @@ src/
     workspace.ts        filesystem confinement
     usage.ts            token accounting
 openapi.json            served at GET /openapi.json
-scripts/smoke.sh        60-check end-to-end suite
+scripts/smoke.sh        74-check end-to-end suite
+scripts/connect.sh      user-run account connection helper
 ```
 
 Two runtime dependencies: `@anthropic-ai/claude-agent-sdk` and `zod`.

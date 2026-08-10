@@ -32,8 +32,9 @@ function buildOptions(
 
   // Injected per call rather than set on the service process, so a shared
   // instance cannot bleed one caller's credential into another's turn.
-  const env = childEnv(ctx.credential, cfg.sessionDir);
-  if (env) opts.env = env;
+  // Always set, never inherited: the child must not see this process's own
+  // secrets, and in agent mode it runs arbitrary commands that could read them.
+  opts.env = childEnv(ctx.credential, cfg.sessionDir);
 
   if (mode === 'run') {
     opts.permissionMode = 'bypassPermissions';
