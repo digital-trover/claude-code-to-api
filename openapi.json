@@ -53,6 +53,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/ClaudeToken"
+          },
+          {
+            "$ref": "#/components/parameters/SessionId"
           }
         ],
         "requestBody": {
@@ -259,6 +262,9 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/ClaudeToken"
+          },
+          {
+            "$ref": "#/components/parameters/SessionId"
           }
         ],
         "requestBody": {
@@ -664,6 +670,18 @@
           "type": "string",
           "pattern": "^sk-ant-[A-Za-z0-9_-]{10,}$"
         }
+      },
+      "SessionId": {
+        "name": "x-session-id",
+        "in": "header",
+        "required": false,
+        "description": "Continue an existing conversation. Take the value from `_headless.session_id` (messages) or `session_id` (runs) on a previous response and send it back verbatim.\n\nReferences are bound to the credential that created them, so one issued to another caller \u2014 or a tampered one \u2014 is ignored and the turn starts fresh rather than resuming someone else's conversation.\n\nWithout it, each request is a cold start: earlier turns are replayed to the model as recounted context rather than real turns, which is lossy and re-sends the whole history.",
+        "schema": {
+          "type": "string",
+          "examples": [
+            "7648a253-9a52-4259-a3fe-b14002acf575.a_4-4thHgk-G7ZtO"
+          ]
+        }
       }
     },
     "responses": {
@@ -746,7 +764,7 @@
           },
           "id": {
             "type": "string",
-            "description": "On tool_use: `<toolUseId>~<sessionId>`. Echo verbatim."
+            "description": "On tool_use: `<toolUseId>~<sessionRef>`. Echo verbatim in `tool_result.tool_use_id`; it is what lets a stateless client continue a stateful session."
           },
           "name": {
             "type": "string"
@@ -956,7 +974,8 @@
             "description": "Non-standard addition; ignore it for wire compatibility.",
             "properties": {
               "session_id": {
-                "type": "string"
+                "type": "string",
+                "description": "Signed session reference. Send back as `x-session-id` to continue."
               },
               "cost_usd": {
                 "type": "number",
@@ -970,7 +989,8 @@
         "type": "object",
         "properties": {
           "session_id": {
-            "type": "string"
+            "type": "string",
+            "description": "Signed session reference. Send back as `x-session-id` to continue."
           },
           "model": {
             "type": "string"

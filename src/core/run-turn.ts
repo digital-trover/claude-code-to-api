@@ -1,7 +1,14 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { TurnContext } from './context.js';
 import { prepareTurn } from './options.js';
-import { exposeToolUse, isUnreplayable, startDeadline, stopReasonFor } from './turn.js';
+import {
+  exposeToolUse,
+  isPendingForCaller,
+  isUnreplayable,
+  startDeadline,
+  stopReasonFor,
+} from './turn.js';
+import { signSession } from '../types/session-ref.js';
 import { UsageAccumulator } from './usage.js';
 import type { ContentBlock, RunRequest, StopReason, Usage } from '../types/wire.js';
 
@@ -10,7 +17,8 @@ export interface TurnResult {
   stop_reason: StopReason;
   model: string;
   usage: Usage;
-  sessionId: string;
+  /** Signed, credential-bound reference the caller sends back to continue. */
+  sessionRef: string;
   /** Harness estimate, not a billing statement. */
   costUsd: number;
 }
@@ -38,7 +46,11 @@ export async function runTurn(req: RunRequest, ctx: TurnContext): Promise<TurnRe
         model = msg.message.model ?? model;
         if (msg.message.stop_reason === 'max_tokens') truncated = true;
         for (const block of msg.message.content as unknown as ContentBlock[]) {
-          if (!isUnreplayable(block.type)) collected.push(block);
+          if (isUnreplayable(block.type)) continue;
+          // Harness tool calls already ran; surfacing them would ask the caller
+          // to execute them again.
+          if (!isPendingForCaller(block)) continue;
+          collected.push(block);
         }
       }
 
@@ -51,12 +63,14 @@ export async function runTurn(req: RunRequest, ctx: TurnContext): Promise<TurnRe
     clear();
   }
 
+  const sessionRef = signSession(sessionId, ctx.credential?.token);
+
   return {
-    content: collected.map((b) => (b.type === 'tool_use' ? exposeToolUse(b, sessionId) : b)),
+    content: collected.map((b) => (b.type === 'tool_use' ? exposeToolUse(b, sessionRef) : b)),
     stop_reason: stopReasonFor(deferred, truncated),
     model,
     usage: totals.usage,
-    sessionId,
+    sessionRef,
     costUsd: totals.costUsd,
   };
 }

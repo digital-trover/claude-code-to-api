@@ -37,6 +37,8 @@ export interface RequestContext {
   draining: boolean;
   /** Parsed query string. */
   query: URLSearchParams;
+  /** Session to continue, from `x-session-id`. Verified against the credential. */
+  sessionRef?: string;
   sendJson: typeof sendJson;
 }
 
@@ -137,6 +139,7 @@ export function createApp(cfg: Config, log: Logger): App {
       signal: disconnect.signal,
       draining,
       query: url.searchParams,
+      sessionRef: typeof req.headers['x-session-id'] === 'string' ? req.headers['x-session-id'] : undefined,
       sendJson,
     };
 

@@ -22,6 +22,9 @@ export const stripPrefix = (name: string): string =>
 
 export const addPrefix = (name: string): string => PREFIX + name;
 
+/** True for tools the caller declared, as opposed to the harness's own. */
+export const isBridgeTool = (name: string): boolean => name.startsWith(PREFIX);
+
 const describe = (node: ZodType, description?: string): ZodType =>
   description ? node.describe(description) : node;
 

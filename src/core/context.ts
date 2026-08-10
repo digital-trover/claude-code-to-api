@@ -11,6 +11,8 @@ export interface TurnContext {
   workspace: Workspace;
   /** Whose Claude account this runs on. Null falls back to the host's own login. */
   credential: Credential | null;
+  /** Session to continue, from the `x-session-id` header. Verified before use. */
+  sessionRef?: string;
   /**
    * Aborted when the client disconnects. Without this a hung-up request leaves
    * the harness running and billing the caller for output nobody receives.

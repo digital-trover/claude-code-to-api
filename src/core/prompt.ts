@@ -7,7 +7,7 @@ import { asBlocks, type AnthropicMessage, type ContentBlock } from '../types/wir
 const PASSTHROUGH = new Set(['text', 'image', 'document']);
 
 export interface PendingResults {
-  sessionId: string;
+  sessionRef: string;
   blocks: ContentBlock[];
 }
 
@@ -25,17 +25,17 @@ export function readPendingResults(messages: AnthropicMessage[]): PendingResults
   if (results.length === 0) return null;
 
   const blocks: ContentBlock[] = [];
-  let sessionId: string | null = null;
+  let sessionRef: string | null = null;
 
   for (const r of results) {
     const unpacked = typeof r.tool_use_id === 'string' ? unpackToolUseId(r.tool_use_id) : null;
     if (!unpacked) return null;
-    if (sessionId === null) sessionId = unpacked.sessionId;
-    else if (sessionId !== unpacked.sessionId) return null;
+    if (sessionRef === null) sessionRef = unpacked.sessionRef;
+    else if (sessionRef !== unpacked.sessionRef) return null;
     blocks.push({ ...r, tool_use_id: unpacked.toolUseId });
   }
 
-  return sessionId ? { sessionId, blocks } : null;
+  return sessionRef ? { sessionRef, blocks } : null;
 }
 
 /**
@@ -74,17 +74,26 @@ const userMessage = (content: ContentBlock[], sessionId: string): SDKUserMessage
   }) as SDKUserMessage;
 
 /**
- * Continuations replay tool results into the resumed session. Cold starts send
- * the final user turn as real content blocks so images and documents survive.
+ * Build the prompt for a turn.
+ *
+ * Three cases, and the distinction matters:
+ *
+ *  - Answering deferred tool calls: replay the results into the session.
+ *  - Continuing a session: send only the new user turn. The transcript is
+ *    already there, so re-sending the history would show the model its own
+ *    conversation twice.
+ *  - Cold start: render the earlier turns as recounted context, since the
+ *    harness accepts user messages but not assistant ones.
  */
 export function buildPrompt(
   messages: AnthropicMessage[],
   pending: PendingResults | null,
+  resuming: boolean,
 ): string | AsyncIterable<SDKUserMessage> {
   if (pending) {
-    const { blocks, sessionId } = pending;
+    const { blocks } = pending;
     return (async function* () {
-      yield userMessage(blocks, sessionId);
+      yield userMessage(blocks, '');
     })();
   }
 
@@ -92,11 +101,12 @@ export function buildPrompt(
   const prior = messages.slice(0, -1);
   const tail = last && last.role === 'user' ? asBlocks(last.content) : [];
   const rich = tail.filter((b) => PASSTHROUGH.has(b.type));
-  const context = prior.length > 0 ? renderHistory(prior) : '';
+  const context = resuming || prior.length === 0 ? '' : renderHistory(prior);
 
   if (rich.every((b) => b.type === 'text')) {
     const text = rich.map((b) => b.text ?? '').join('\n');
-    return (context ? `${context}\n\nUser: ${text}` : text) || renderHistory(messages);
+    const prompt = context ? `${context}\n\nUser: ${text}` : text;
+    return prompt || (resuming ? '' : renderHistory(messages));
   }
 
   const blocks: ContentBlock[] = [];

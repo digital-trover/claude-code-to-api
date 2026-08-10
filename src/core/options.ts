@@ -1,7 +1,8 @@
 import type { Options, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { TurnContext } from './context.js';
 import { childEnv } from './credentials.js';
-import { buildPrompt, readPendingResults } from './prompt.js';
+import { buildPrompt, readPendingResults, type PendingResults } from './prompt.js';
+import { verifySession } from '../types/session-ref.js';
 import { addPrefix, buildBridge, deferHook } from './tools.js';
 import { systemToText, type RunRequest } from '../types/wire.js';
 
@@ -39,17 +40,21 @@ function buildOptions(
   if (mode === 'run') {
     opts.permissionMode = 'bypassPermissions';
     if (req.allowed_tools?.length) opts.allowedTools = req.allowed_tools;
-    return opts;
+  } else {
+    // Provider emulation: strip the harness's own tools so the prompt carries
+    // only what the caller declared.
+    opts.tools = [];
+    opts.thinking = { type: 'disabled' };
   }
 
-  opts.tools = [];
-  opts.thinking = { type: 'disabled' };
-
+  // Caller tools work in both modes. In agent mode they sit alongside the
+  // harness toolset — the defer hook is scoped to the bridge prefix, so
+  // built-ins still execute normally and only caller tools come back.
   const tools = req.tools ?? [];
   if (tools.length > 0) {
     opts.mcpServers = { bridge: buildBridge(tools) };
-    opts.allowedTools = tools.map((t) => addPrefix(t.name));
     opts.hooks = deferHook;
+    if (mode === 'messages') opts.allowedTools = tools.map((t) => addPrefix(t.name));
   }
   return opts;
 }
@@ -57,17 +62,34 @@ function buildOptions(
 export interface PreparedTurn {
   options: Options;
   prompt: string | AsyncIterable<SDKUserMessage>;
-  /** Session we are resuming, if any — used before the harness reports one. */
+  /** Session being resumed, if any — used before the harness reports one. */
   seedSession: string;
 }
 
+/**
+ * Resolve which session this turn continues.
+ *
+ * A reference can arrive three ways: inside a `tool_use.id` the caller echoed
+ * back, in the `x-session-id` header, or as `session_id` in the body. All are
+ * verified against the caller's credential, and one that does not verify is
+ * treated as absent — a fresh session, never someone else's.
+ */
+function resolveSession(req: RunRequest, ctx: TurnContext, pending: PendingResults | null): string {
+  const reference = pending?.sessionRef ?? ctx.sessionRef ?? req.session_id;
+  if (!reference) return '';
+  return verifySession(reference, ctx.credential?.token) ?? '';
+}
+
 export function prepareTurn(req: RunRequest, ctx: TurnContext, stream: boolean): PreparedTurn {
-  const pending = ctx.mode === 'messages' ? readPendingResults(req.messages) : null;
-  const resume = pending?.sessionId ?? (ctx.mode === 'run' ? req.session_id : undefined);
+  // Both modes: a deferred tool is answered the same way regardless of whether
+  // the harness also had tools of its own. Results whose ids are not ours fail
+  // to unpack and fall through to the normal path.
+  const pending = readPendingResults(req.messages);
+  const resume = resolveSession(req, ctx, pending);
 
   return {
-    options: buildOptions(req, ctx, resume, stream),
-    prompt: buildPrompt(req.messages, pending),
-    seedSession: resume ?? '',
+    options: buildOptions(req, ctx, resume || undefined, stream),
+    prompt: buildPrompt(req.messages, pending, resume !== ''),
+    seedSession: resume,
   };
 }

@@ -234,15 +234,41 @@ running it. Two details make it reliable:
 Because the turn *ends*, no process is parked between HTTP requests. Session
 state lives in the CLI's own transcript.
 
+## Continuing a conversation
+
+The harness is stateful; this API is not. Every response carries a session
+reference — `_headless.session_id` on `/v1/messages`, `session_id` on `/v1/runs`
+— and sending it back as `x-session-id` continues that conversation.
+
+```bash
+REF=$(curl -s ... | jq -r '._headless.session_id')
+curl ... -H "x-session-id: $REF" -d '{"messages":[{"role":"user","content":"and what did I say before?"}]}'
+```
+
+On a resumed turn, **send only the new message**. The transcript already exists
+on the harness side, so re-sending history would show the model its own
+conversation twice.
+
+Without a reference each request is a cold start: earlier turns are replayed as
+recounted context rather than real turns, because the harness accepts user
+messages but not assistant ones. That is lossy, so treat it as the first turn of
+a conversation or as recovery — not the steady state.
+
+References are **bound to the credential** that created them. The binding key is
+derived from the token itself, so it needs no configuration and survives a
+restart, while a reference leaked through a log is inert in anyone else's hands.
+One that does not verify is treated as absent — a fresh session, never someone
+else's.
+
 ### The `tool_use.id` contract
 
-Continuations need to find the harness session, but the Messages API is
-stateless — there is nowhere to put a session id. So it rides inside the one
-field the protocol guarantees is echoed back verbatim:
+A tool loop has the same problem, but a client mid-loop is not obliged to carry
+a header. The one field the protocol *does* require it to echo verbatim is
+`tool_use.id`, so the reference rides inside it:
 
 ```
-toolu_01Q4wJxoDB87FRno89XdthZo~9be0403a-6683-4aaa-9eb3-dee9a600f3c8
-└─ harness tool_use id ────────┘ └─ session id ───────────────────┘
+toolu_01Q4wJxoDB87FRno89XdthZo~9be0403a-...-dee9a600f3c8.a_4-4thHgk-G7ZtO
+└─ harness tool_use id ────────┘ └─ session id ──────────┘└─ signature ──┘
 ```
 
 The service packs it on the way out and unpacks it from `tool_result.tool_use_id`
@@ -424,7 +450,7 @@ src/
   logger.ts
   types/
     wire.ts             Anthropic request/response shapes
-    session-ref.ts      session id packing into tool_use.id
+    session-ref.ts      signed, credential-bound session references
   http/
     errors.ts           ApiError + mapping onto the Anthropic envelope
     respond.ts          JSON and SSE writers

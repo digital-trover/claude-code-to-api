@@ -110,6 +110,24 @@ for ev in message_start content_block_start content_block_delta content_block_st
 done
 check "stream carries a terminal stop_reason" "$(has '"stop_reason":"end_turn"' "$S" && echo 0 || echo 1)" ""
 
+echo "== session continuity =="
+R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" \
+  -d '{"messages":[{"role":"user","content":"My favourite colour is teal. Reply with just: noted"}]}')
+SREF=$(python3 -c "import json,sys;print(json.load(sys.stdin)['_headless']['session_id'])" <<<"$R" 2>/dev/null)
+check "response carries a session reference" "$([[ "$SREF" == *.* ]] && echo 0 || echo 1)" "ref=$SREF"
+
+R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" -H "x-session-id: $SREF" \
+  -d '{"messages":[{"role":"user","content":"What is my favourite colour? One word."}]}')
+check "session header continues the conversation" "$(grep -qi 'teal' <<<"$R" && echo 0 || echo 1)" "$(head -c 160 <<<"$R")"
+R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" \
+  -d '{"messages":[{"role":"user","content":"What is my favourite colour? One word."}]}')
+check "no session header means a cold start" "$(grep -qi 'teal' <<<"$R" && echo 1 || echo 0)" "$(head -c 160 <<<"$R")"
+
+# A reference that does not verify must start fresh, never resume blindly.
+R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" -H "x-session-id: ${SREF%.*}.TAMPEREDTAG00000" \
+  -d '{"messages":[{"role":"user","content":"What is my favourite colour? One word."}]}')
+check "tampered reference falls back to a cold start" "$(grep -qi 'teal' <<<"$R" && echo 1 || echo 0)" "$(head -c 160 <<<"$R")"
+
 echo "== tier 3: tool loop (non-streaming) =="
 TOOLS='[{"name":"get_weather","description":"Get current weather for a city.","input_schema":{"type":"object","properties":{"city":{"type":"string","description":"City name"}},"required":["city"]}}]'
 R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" \
@@ -189,6 +207,38 @@ check "x-claude-token required without ambient opt-in" "$([[ "$CODE" == "401" ]]
 check "service log never contains a raw token" \
   "$(grep -qE 'sk-ant-[A-Za-z0-9_-]{12,}' "$LOG" && echo 1 || echo 0)" \
   "$(grep -oE 'sk-ant-[A-Za-z0-9_-]{12,}' "$LOG" | head -1)"
+
+echo "== agent session continuity =="
+R=$(curl -s -X POST "$BASE/v1/runs" "${AUTH[@]}" \
+  -d '{"messages":[{"role":"user","content":"Remember the codeword ZEBRA. Reply with just: ok"}],"max_turns":3}')
+RREF=$(python3 -c "import json,sys;print(json.load(sys.stdin)['session_id'])" <<<"$R" 2>/dev/null)
+check "run returns a session reference" "$([[ "$RREF" == *.* ]] && echo 0 || echo 1)" "ref=$RREF"
+
+R=$(curl -s -X POST "$BASE/v1/runs" "${AUTH[@]}" -H "x-session-id: $RREF" \
+  -d '{"messages":[{"role":"user","content":"What was the codeword? One word."}],"max_turns":3}')
+check "resumed run recalls earlier context" "$(grep -qi 'zebra' <<<"$R" && echo 0 || echo 1)" "$(head -c 160 <<<"$R")"
+echo "== agent mode with caller tools =="
+MIXED='[{"name":"submit_build","description":"Signal the build is complete.","input_schema":{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]}}]'
+R=$(curl -s -X POST "$BASE/v1/runs" "${AUTH[@]}" -d "{
+  \"system\":\"Write files, then call submit_build.\",
+  \"messages\":[{\"role\":\"user\",\"content\":\"Create fixture/built.txt containing OK, then call submit_build with summary done.\"}],
+  \"tools\":$MIXED,\"max_turns\":8}")
+check "caller tool defers while harness tools run" "$(has '\"stop_reason\":\"tool_use\"' "$R" && echo 0 || echo 1)" "$(head -c 200 <<<"$R")"
+check "harness did its own work" "$([[ -f "$ROOT/fixture/built.txt" ]] && echo 0 || echo 1)" "fixture/built.txt missing"
+check "only the caller's tool is returned" \
+  "$(python3 -c "
+import json,sys
+d=json.loads(sys.argv[1])
+names=[b.get('name') for b in d.get('content',[]) if b.get('type')=='tool_use']
+sys.exit(0 if names==['submit_build'] else 1)" "$R" && echo 0 || echo 1)" \
+  "$(python3 -c "import json,sys;d=json.loads(sys.argv[1]);print([b.get('name') for b in d.get('content',[]) if b.get('type')=='tool_use'])" "$R" 2>/dev/null)"
+
+MTID=$(python3 -c "import json,sys;d=json.loads(sys.argv[1]);print(next((b['id'] for b in d.get('content',[]) if b.get('type')=='tool_use'),''))" "$R" 2>/dev/null)
+MREF=$(python3 -c "import json,sys;print(json.loads(sys.argv[1]).get('session_id',''))" "$R" 2>/dev/null)
+R2=$(curl -s -X POST "$BASE/v1/runs" "${AUTH[@]}" -H "x-session-id: $MREF" -d "{
+  \"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"$MTID\",\"content\":\"PLATYPUS-9931\"}]}],
+  \"tools\":$MIXED,\"max_turns\":4}")
+check "tool result reaches the agent in run mode" "$(has 'PLATYPUS-9931' "$R2" && echo 0 || echo 1)" "$(head -c 200 <<<"$R2")"
 
 echo "== workspace files =="
 R=$(curl -s "$BASE/v1/workspace/files?prefix=fixture/agent" "${AUTH[@]}")

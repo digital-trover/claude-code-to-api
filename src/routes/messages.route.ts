@@ -15,6 +15,7 @@ export async function createMessage(ctx: RequestContext, res: ServerResponse): P
     cfg: ctx.cfg,
     workspace: ctx.workspace,
     credential: ctx.credential,
+    sessionRef: ctx.sessionRef,
   };
   const id = messageId();
 
@@ -31,6 +32,6 @@ export async function createMessage(ctx: RequestContext, res: ServerResponse): P
     stop_sequence: null,
     usage: turn.usage,
     // Additive; clients that ignore it stay wire-compatible.
-    _headless: { session_id: turn.sessionId, cost_usd: turn.costUsd },
+    _headless: { session_id: turn.sessionRef, cost_usd: turn.costUsd },
   });
 }

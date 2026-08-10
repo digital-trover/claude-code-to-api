@@ -2,7 +2,14 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { TurnContext } from './context.js';
 import { prepareTurn } from './options.js';
-import { exposeToolUse, isUnreplayable, startDeadline, stopReasonFor } from './turn.js';
+import {
+  exposeToolUse,
+  isPendingForCaller,
+  isUnreplayable,
+  startDeadline,
+  stopReasonFor,
+} from './turn.js';
+import { signSession } from '../types/session-ref.js';
 import { UsageAccumulator } from './usage.js';
 import { emptyUsage, type ContentBlock, type RunRequest, type Usage } from '../types/wire.js';
 
@@ -87,7 +94,7 @@ export async function* streamTurn(
       if (event.type === 'content_block_start') {
         const upstreamIndex = event.index as number;
         const raw = event.content_block as ContentBlock;
-        if (isUnreplayable(raw.type)) continue;
+        if (isUnreplayable(raw.type) || !isPendingForCaller(raw)) continue;
 
         const index = nextIndex++;
         indexMap.set(upstreamIndex, index);
@@ -98,7 +105,10 @@ export async function* streamTurn(
           data: {
             type: 'content_block_start',
             index,
-            content_block: raw.type === 'tool_use' ? exposeToolUse(raw, sessionId) : raw,
+            content_block:
+              raw.type === 'tool_use'
+                ? exposeToolUse(raw, signSession(sessionId, ctx.credential?.token))
+                : raw,
           },
         };
         continue;

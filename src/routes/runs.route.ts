@@ -14,6 +14,7 @@ export async function createRun(ctx: RequestContext, res: ServerResponse): Promi
     cfg: ctx.cfg,
     workspace: ctx.workspace,
     credential: ctx.credential,
+    sessionRef: ctx.sessionRef,
   };
 
   if (body.stream) {
@@ -29,7 +30,7 @@ export async function createRun(ctx: RequestContext, res: ServerResponse): Promi
 
   const turn = await runTurn(body, turnCtx);
   ctx.sendJson(res, 200, {
-    session_id: turn.sessionId,
+    session_id: turn.sessionRef,
     model: turn.model,
     result: turn.content
       .filter((b) => b.type === 'text')
