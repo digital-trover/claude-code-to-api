@@ -1,9 +1,10 @@
 {
   "name": "claude-headless-api",
   "version": "0.1.0",
-  "private": true,
-  "type": "module",
   "description": "Portable HTTP service wrapping Claude Code headless. Exposes an agent API (tier 1) and an Anthropic /v1/messages-compatible surface with tool calling (tiers 2-3).",
+  "license": "MIT",
+  "author": "Saad Qayyum <isaadqayyum@gmail.com>",
+  "type": "module",
   "engines": {
     "node": ">=20"
   },

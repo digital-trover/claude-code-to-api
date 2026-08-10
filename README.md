@@ -482,3 +482,17 @@ scripts/connect.sh      user-run account connection helper
 ```
 
 Two runtime dependencies: `@anthropic-ai/claude-agent-sdk` and `zod`.
+
+---
+
+## Licence
+
+MIT — see `LICENSE`.
+
+That covers this source code only. Running it means using Anthropic's Claude,
+which is governed by Anthropic's terms, and the MIT licence cannot grant rights
+there. **`USAGE.md` sets out the operating terms**, in particular the rule this
+service is built around: each caller supplies their own Claude credential, and
+you must not point other people's traffic at your own subscription.
+
+Not affiliated with, endorsed by, or supported by Anthropic.
