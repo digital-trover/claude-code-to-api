@@ -22,6 +22,16 @@ export async function createMessage(ctx: RequestContext, res: ServerResponse): P
   if (body.stream) return relaySse(res, streamTurn(body, turnCtx, id));
 
   const turn = await runTurn(body, turnCtx);
+
+  // `max_tokens` is required by the Messages API but the harness has no setting
+  // for it, so it cannot be enforced. Say so when a caller is actually affected,
+  // rather than letting the difference pass unremarked.
+  if (body.max_tokens && turn.usage.output_tokens > body.max_tokens) {
+    ctx.log.info(
+      `max_tokens not enforced: asked ${body.max_tokens}, produced ${turn.usage.output_tokens}`,
+    );
+  }
+
   ctx.sendJson(res, 200, {
     id,
     type: 'message',

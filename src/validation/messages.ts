@@ -49,10 +49,47 @@ function validateTools(value: unknown): void {
   assertNoDuplicates(names, 'tools');
 }
 
+
+/**
+ * Generation controls the harness does not expose.
+ *
+ * The Agent SDK offers no way to set sampling or output limits — `maxOutputTokens`
+ * and `maxTokens` in its types are reporting fields, not inputs — so a request
+ * carrying these would be answered as though they had been applied. Measured:
+ * `max_tokens: 16` returned 452 output tokens, and `stop_sequences: ["STOP"]`
+ * came back with STOP still in the text.
+ *
+ * Refused rather than dropped, for the same reason `count_tokens` returns 501:
+ * a caller that sets a bound and is quietly given something else is worse off
+ * than one told plainly that the bound is unavailable.
+ *
+ * `max_tokens` is deliberately absent — the Messages API requires it, so
+ * rejecting it would turn away every conforming client. It is documented as
+ * unenforced instead.
+ */
+const UNSUPPORTED: Array<[string, string]> = [
+  ['temperature', 'sampling is fixed by the harness'],
+  ['top_p', 'sampling is fixed by the harness'],
+  ['top_k', 'sampling is fixed by the harness'],
+  ['stop_sequences', 'the harness ends turns on its own'],
+];
+
+function assertNoUnsupported(req: Record<string, unknown>): void {
+  for (const [field, why] of UNSUPPORTED) {
+    if (req[field] !== undefined) {
+      throw badRequest(
+        `${field}: not supported by this service — ${why}. ` +
+          'Remove it, or call api.anthropic.com directly if you need it.',
+      );
+    }
+  }
+}
+
 /** Validates and narrows a `/v1/messages` body. */
 export function validateMessagesRequest(body: unknown): MessagesRequest {
   const req = assertObject(body, 'body');
 
+  assertNoUnsupported(req);
   validateMessages(req.messages);
   validateTools(req.tools);
   assertOptionalString(req.model, 'model');

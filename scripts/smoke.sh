@@ -160,6 +160,20 @@ R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" -d '{
 check "caller tool still reachable alongside the denylist" \
   "$(grep -qE '\"name\":\"note\"' <<<"$R" && echo 0 || echo 1)" "$(head -c 200 <<<"$R")"
 
+# Sampling and stop controls cannot be honoured by the harness, so they are
+# refused. Silently accepting them would hand a caller a bound it never got.
+for field in '"temperature":0.5' '"top_p":0.9' '"top_k":5' '"stop_sequences":["X"]'; do
+  name="${field%%:*}"
+  R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" \
+    -d "{\"max_tokens\":8,${field},\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+  check "rejects ${name//\"/}" "$(has 'not supported by this service' "$R" && echo 0 || echo 1)" "$(head -c 160 <<<"$R")"
+done
+
+# ...while a conforming request that sets none of them is unaffected.
+R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" \
+  -d '{"max_tokens":16,"messages":[{"role":"user","content":"Reply with exactly: PLAIN-OK"}]}')
+check "a request without them still succeeds" "$(has 'PLAIN-OK' "$R" && echo 0 || echo 1)" "$(head -c 160 <<<"$R")"
+
 echo "== tier 3: tool loop (non-streaming) =="
 TOOLS='[{"name":"get_weather","description":"Get current weather for a city.","input_schema":{"type":"object","properties":{"city":{"type":"string","description":"City name"}},"required":["city"]}}]'
 R=$(curl -s -X POST "$BASE/v1/messages" "${AUTH[@]}" \

@@ -188,6 +188,32 @@ developer's own login is the whole point of it.
 Tokens are never logged — the smoke suite asserts the service log contains no
 raw `sk-ant-…` string.
 
+## Two different tokens
+
+Requests carry two credentials that are easy to confuse, because they protect
+different things:
+
+| Header | What it is | What it protects |
+|---|---|---|
+| `x-api-key` (or `authorization: Bearer`) | `SERVICE_AUTH_TOKEN` — gates **this service** | Your container |
+| `x-claude-token` | The caller's own Claude credential | Their Anthropic account |
+
+The service token is not about protecting the Claude key — that arrives per
+request and is never stored. It exists because `POST /v1/runs` runs with
+`bypassPermissions`, which is a shell on this container. Without the token,
+anyone who can reach the port can bring *their own* Claude credential and use
+your machine as free compute with arbitrary code execution.
+
+So whether you need it follows from reachability, not from secrecy:
+
+- **Loopback only** (the default `HOST`): nothing off-box can reach it, and the
+  token adds nothing.
+- **Bound to `0.0.0.0`, or a ClusterIP service**: it is the only thing between
+  any pod in the cluster and a shell here.
+
+The service warns at startup when it is unset *and* bound to a non-loopback
+address, which is exactly the case where its absence matters.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -364,8 +390,9 @@ grace period is moot.
 
 | Feature | Status |
 |---|---|
-| `max_tokens` | Validated, not enforced. The harness exposes no output cap; `stop_reason: "max_tokens"` is reported when it happens |
-| `temperature`, `top_p`, `top_k` | Ignored. Not exposed by the harness (and removed on current models anyway) |
+| `max_tokens` | Accepted (the API requires it) but **not enforced** — the harness exposes no output cap, so a response may exceed it. Each overrun is logged. `stop_reason: "max_tokens"` reflects the harness's own cap, not yours |
+| `temperature`, `top_p`, `top_k` | **Rejected with 400.** Not exposed by the harness, so honouring them is impossible; refused rather than silently dropped |
+| `stop_sequences` | **Rejected with 400.** The harness ends turns on its own |
 | Prompt caching control (`cache_control`) | Ignored. The harness manages its own caching |
 | Structured outputs (`output_config.format`) | Not supported |
 | Thinking blocks | Stripped. Their signatures are bound to the harness session and cannot be replayed by a caller |

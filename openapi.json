@@ -855,7 +855,8 @@
         "properties": {
           "model": {
             "type": "string",
-            "default": "claude-sonnet-4-6"
+            "default": "claude-sonnet-4-6",
+            "description": "Model to run. Defaults to the service DEFAULT_MODEL."
           },
           "system": {
             "oneOf": [
@@ -876,28 +877,45 @@
             "minItems": 1,
             "items": {
               "$ref": "#/components/schemas/InputMessage"
-            }
+            },
+            "description": "Full conversation. Requests are stateless: send the whole history each time. Content may be a string or blocks; text, image and document blocks are supported."
           },
           "tools": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Tool"
-            }
+            },
+            "description": "Caller-declared tools. They are deferred back to you rather than executed here."
           },
           "stream": {
             "type": "boolean",
-            "default": false
+            "default": false,
+            "description": "Server-sent events in the Anthropic streaming format, including text deltas."
           },
           "max_tokens": {
             "type": "integer",
             "minimum": 1,
-            "description": "Validated but not enforced \u2014 the harness exposes no output cap. `stop_reason: \"max_tokens\"` is still reported when truncation happens."
+            "description": "Accepted for wire compatibility but NOT enforced: the harness exposes no output limit, so a response may exceed it (measured: 16 requested, 452 produced). The service logs when a response overruns the value you set."
           },
           "metadata": {
             "type": "object",
-            "additionalProperties": true
+            "additionalProperties": true,
+            "description": "Accepted and ignored \u2014 the harness does not forward it upstream."
+          },
+          "temperature": {
+            "description": "REJECTED with 400 \u2014 sampling is fixed by the harness. Present here so the limitation is discoverable; do not send it."
+          },
+          "top_p": {
+            "description": "REJECTED with 400 \u2014 sampling is fixed by the harness. Present here so the limitation is discoverable; do not send it."
+          },
+          "top_k": {
+            "description": "REJECTED with 400 \u2014 sampling is fixed by the harness. Present here so the limitation is discoverable; do not send it."
+          },
+          "stop_sequences": {
+            "description": "REJECTED with 400 \u2014 the harness ends turns on its own. Present here so the limitation is discoverable; do not send it."
           }
-        }
+        },
+        "description": "Anthropic Messages API emulation. Supported: model, system, messages (text, image and document blocks), tools, stream, max_tokens (accepted, not enforced), metadata (ignored). Rejected with 400: temperature, top_p, top_k, stop_sequences \u2014 the harness fixes sampling and ends turns on its own, so honouring them is impossible."
       },
       "RunRequest": {
         "allOf": [

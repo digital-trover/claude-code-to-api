@@ -80,6 +80,51 @@ Minimum obligations:
 - **Do not use a user's credential for anything they did not ask for.** Their
   quota is theirs.
 
+## What the Messages API emulation supports
+
+`POST /v1/messages` speaks the Anthropic wire format. What it honours:
+
+| Field | Behaviour |
+|---|---|
+| `model` | Honoured; falls back to the service `DEFAULT_MODEL` |
+| `messages` | Full history each request — the endpoint is stateless. Text, image and document blocks all work |
+| `system` | Honoured; replaces the harness system prompt |
+| `tools` | Honoured. Deferred back to the caller rather than executed here |
+| `stream` | Honoured, including incremental text deltas |
+| `metadata` | Accepted and ignored |
+| `max_tokens` | Accepted but **not enforced** — see below |
+
+Also available: `GET /v1/models`, and `POST /v1/credentials/status` for checking a
+credential without spending tokens.
+
+## What it does not support
+
+The harness generates on its own terms, so parts of the Messages API cannot be
+reproduced. These are **rejected with 400** rather than accepted and ignored:
+
+| Field | Why |
+|---|---|
+| `temperature` | Sampling is fixed by the harness |
+| `top_p` | Sampling is fixed by the harness |
+| `top_k` | Sampling is fixed by the harness |
+| `stop_sequences` | The harness ends turns on its own |
+
+Rejecting rather than ignoring is deliberate. A caller that sets a bound and is
+quietly given something else is worse off than one told plainly that the bound
+is unavailable — the same reason `count_tokens` returns 501 instead of guessing.
+
+Accepted but **not honoured**, because refusing them would break conforming
+clients:
+
+| Field | Behaviour |
+|---|---|
+| `max_tokens` | Required by the Messages API, but the harness exposes no output limit, so a response may exceed it (measured: 16 requested, 452 produced). The service logs each overrun |
+| `cache_control` | The harness manages prompt caching; markers have no effect |
+
+Not implemented at all — these paths return 404: Batches (`/v1/messages/batches`),
+the Files API. `POST /v1/messages/count_tokens` returns 501 with an explanation
+rather than a guess.
+
 ## Agent mode executes arbitrary code
 
 `POST /v1/runs` gives the model a shell with `bypassPermissions`. It will run
